@@ -4,6 +4,10 @@ import {
   CartesianGrid, Legend, ReferenceArea, BarChart, Bar,
 } from "recharts";
 import { jsPDF } from "jspdf";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 /* ── Vlinderdagboek ─ dagboek voor mensen met Hashimoto ──────────────
    De schildklier heeft de vorm van een vlinder; vandaar de naam.
@@ -286,6 +290,77 @@ export default function Vlinderdagboek() {
     };
     lezer.readAsText(bestand);
     e.target.value = "";
+  };
+
+  /* lab-PDF lokaal uitlezen: tekst eruit halen en bekende waarden herkennen.
+     De PDF verlaat het toestel nooit — alles gebeurt in de browser.        */
+  const leesLabPdf = async (e) => {
+    const bestand = e.target.files?.[0];
+    e.target.value = "";
+    if (!bestand) return;
+    setMelding("PDF lezen…");
+    try {
+      const buf = await bestand.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      let tekst = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const pagina = await pdf.getPage(i);
+        const inhoud = await pagina.getTextContent();
+        tekst += inhoud.items.map((it) => it.str).join(" ") + "\n";
+      }
+
+      if (tekst.replace(/\s/g, "").length < 40) {
+        setMelding("Deze PDF lijkt een scan of foto te zijn — daar kan geen tekst uit gelezen worden. Vul de waarden handmatig in.");
+        setTimeout(() => setMelding(""), 5000);
+        return;
+      }
+
+      const patronen = {
+        tsh: /\bTSH\b/i,
+        ft4: /\bFT4\b|vrije?\s*T4|free\s*T4|T4[,\s]+vrij/i,
+        ft3: /\bFT3\b|vrije?\s*T3|free\s*T3|T3[,\s]+vrij/i,
+        tpo: /anti[-\s]?TPO|TPO[-\s]?(antistoffen|ab|as)|peroxidase/i,
+        tg: /anti[-\s]?(Tg\b|thyreoglobuline)|thyreoglobuline[-\s]?(antistoffen|as)/i,
+        vitd: /vitamine?\s*D\b|25[-\s]?(OH|hydroxy)/i,
+        b12: /\bB\s?12\b|cobalamine/i,
+        ferritine: /ferritine|ferritin/i,
+      };
+
+      const gevonden = {};
+      for (const [key, re] of Object.entries(patronen)) {
+        const m = tekst.match(re);
+        if (!m) continue;
+        /* eerste getal vlak na de naam van de bepaling is vrijwel altijd het resultaat */
+        const stuk = tekst.slice(m.index + m[0].length, m.index + m[0].length + 60);
+        const getal = stuk.match(/\d{1,4}(?:[.,]\d{1,3})?/);
+        if (getal) gevonden[key] = getal[0];
+      }
+
+      /* afnamedatum proberen te vinden (dd/mm/jjjj of dd-mm-jjjj) */
+      let isoDatum = null;
+      const d = tekst.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](20\d{2})\b/);
+      if (d) {
+        const dag = d[1].padStart(2, "0"), maand = d[2].padStart(2, "0");
+        if (Number(maand) <= 12 && Number(dag) <= 31) {
+          const kandidaat = `${d[3]}-${maand}-${dag}`;
+          if (kandidaat <= vandaag()) isoDatum = kandidaat;
+        }
+      }
+
+      const n = Object.keys(gevonden).length;
+      if (n === 0) {
+        setMelding("Geen herkenbare waarden gevonden in deze PDF — vul ze handmatig in.");
+        setTimeout(() => setMelding(""), 4500);
+        return;
+      }
+
+      setLabForm((prev) => ({ ...prev, ...gevonden, ...(isoDatum ? { datum: isoDatum } : {}) }));
+      setMelding(`${n} waarde${n === 1 ? "" : "n"} ingevuld — controleer ze met je uitslag vóór het opslaan!`);
+      setTimeout(() => setMelding(""), 6000);
+    } catch {
+      setMelding("PDF kon niet gelezen worden — vul de waarden handmatig in.");
+      setTimeout(() => setMelding(""), 4500);
+    }
   };
 
   const toggleSymptoom = (s) =>
@@ -578,6 +653,19 @@ export default function Vlinderdagboek() {
         ) : tab === "lab" ? (
           <>
             <Kaart titel="Nieuwe bloedafname" sub="Vul in wat je labo gemeten heeft; laat de rest leeg. Referentiewaarden verschillen per labo — neem die van jouw uitslag als leidraad.">
+              <label
+                style={{
+                  display: "block", textAlign: "center", padding: "12px 10px", borderRadius: 12,
+                  border: `1.5px dashed ${C.primary}`, color: C.primary, fontSize: 14.5,
+                  fontWeight: 700, cursor: "pointer", background: C.primarySoft, marginBottom: 6,
+                }}
+              >
+                📄 PDF van je labuitslag inlezen
+                <input type="file" accept="application/pdf,.pdf" onChange={leesLabPdf} style={{ display: "none" }} />
+              </label>
+              <p style={{ fontSize: 11.5, color: C.muted, margin: "0 0 14px", textAlign: "center", lineHeight: 1.5 }}>
+                De PDF wordt op je eigen toestel gelezen en nergens naartoe gestuurd. Werkt met digitale uitslagen (geen scans of foto's). Controleer de ingevulde waarden altijd zelf.
+              </p>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
                 <Veld label="Datum afname" type="date" max={vandaag()} value={labForm.datum} onChange={(e) => setLabForm({ ...labForm, datum: e.target.value })} />
                 <Veld label="Dosis levothyroxine" type="number" inputMode="numeric" value={labForm.dosis} onChange={(e) => setLabForm({ ...labForm, dosis: e.target.value })} suffix="µg" />
